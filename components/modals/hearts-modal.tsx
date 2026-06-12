@@ -48,7 +48,7 @@ export const HeartsModal = () => {
           </DialogTitle>
 
           <DialogDescription className="text-center text-base">
-            Get Pro for unlimited hearts, or purchase them in the store.
+            Practice completed lessons to refill your hearts.
           </DialogDescription>
         </DialogHeader>
 
@@ -60,7 +60,7 @@ export const HeartsModal = () => {
               size="lg"
               onClick={onClick}
             >
-              Get unlimited hearts
+              Practice to refill hearts
             </Button>
 
             <Button
