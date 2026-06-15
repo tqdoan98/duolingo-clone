@@ -69,11 +69,29 @@ bun run db:prod    # seed the 5 courses incl. the HSK Chinese curriculum
 
 ## 7. (Optional) Mandarin audio
 
-Generate the pronunciation files, then commit them so they ship in the image:
+The Chinese courses cover HSK 1–6 (~4,800 words). Generate the pronunciation
+files, then commit them so they ship in the image. Audio powers the "listening"
+challenges (the speaker button on Chinese prompts); until generated, those
+challenges fall back to reading.
 
 ```bash
+# Everything at once
 GOOGLE_TTS_API_KEY=... bun run audio:zh
+
+# Or one HSK level at a time to spread out the quota/cost
+HSK_LEVEL=1 GOOGLE_TTS_API_KEY=... bun run audio:zh
+
 git add public/zh_*.mp3 && git commit -m "Add Mandarin audio" && git push
+```
+
+## 8. (Maintenance) Regenerating the HSK word list
+
+HSK 2–6 vocabulary lives in `scripts/zh-hsk-data.json`, generated from the open
+[complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary)
+dataset. To rebuild it:
+
+```bash
+bunx tsx scripts/build-zh-hsk.ts
 ```
 
 ## Notes

@@ -73,6 +73,8 @@ export const challenges = pgTable("challenges", {
   type: challengesEnum("type").notNull(),
   question: text("question").notNull(),
   order: integer("order").notNull(),
+  // Optional prompt audio (e.g. Mandarin pronunciation) for listening challenges.
+  audioSrc: text("audio_src"),
 });
 
 export const challengesRelations = relations(challenges, ({ one, many }) => ({

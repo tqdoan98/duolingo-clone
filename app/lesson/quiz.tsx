@@ -213,7 +213,10 @@ export const Quiz = ({
 
             <div>
               {challenge.type === "ASSIST" && (
-                <QuestionBubble question={challenge.question} />
+                <QuestionBubble
+                  question={challenge.question}
+                  audioSrc={challenge.audioSrc}
+                />
               )}
 
               <Challenge

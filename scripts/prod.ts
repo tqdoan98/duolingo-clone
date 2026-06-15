@@ -1,3 +1,6 @@
+import { readFileSync } from "fs";
+import { join } from "path";
+
 import { neon } from "@neondatabase/serverless";
 import "dotenv/config";
 import { drizzle } from "drizzle-orm/neon-http";
@@ -15,6 +18,12 @@ const shuffle = <T>(arr: T[]): T[] => {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+};
+
+const chunk = <T>(arr: T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 };
 
 // ─── Scaffold languages (starter placeholder content) ─────────────────────
@@ -89,42 +98,156 @@ const buildScaffoldOptions = (
   ],
 });
 
-// ─── Chinese challenge builder (HSK curriculum) ────────────────────────────
+// ─── Chinese (HSK) course builder ──────────────────────────────────────────
 
-type ChallengeRow = {
+type ZWord = Word & { radical?: string };
+type ZLesson = { title: string; words: ZWord[] };
+type ZUnit = { title: string; description: string; lessons: ZLesson[] };
+
+const OPTIONS_PER_CHALLENGE = 4;
+
+const pinyinInitial = (pinyin: string): string =>
+  (pinyin.match(/[a-z]/i)?.[0] ?? "").toLowerCase();
+
+// Smart distractors: prefer words sharing a radical or pinyin initial with the
+// target (harder to tell apart), then fall back to random words in the level.
+const pickDistractors = (word: ZWord, pool: ZWord[], n: number): ZWord[] => {
+  const others = pool.filter(
+    (p) => p.chinese !== word.chinese && p.english !== word.english
+  );
+  const similar = shuffle(
+    others.filter(
+      (p) =>
+        (word.radical && p.radical === word.radical) ||
+        pinyinInitial(p.pinyin) === pinyinInitial(word.pinyin)
+    )
+  );
+  const similarSet = new Set(similar);
+  const rest = shuffle(others.filter((p) => !similarSet.has(p)));
+  return [...similar, ...rest].slice(0, n);
+};
+
+type BuiltChallenge = {
   type: "SELECT" | "ASSIST";
   question: string;
   order: number;
+  audioSrc: string | null;
   options: { correct: boolean; text: string; audioSrc?: string }[];
 };
 
-const buildZhChallenges = (words: Word[]): ChallengeRow[] => {
-  const [w0, w1, w2, w3, w4, w5] = words;
-  const opt = (w: Word, correct: boolean) => ({
-    correct,
-    text: `${w.chinese} (${w.pinyin})`,
-    audioSrc: `/zh_${w.slug}.mp3`,
+const buildChineseChallenges = (
+  lessonWords: ZWord[],
+  pool: ZWord[],
+  showPinyin: boolean
+): BuiltChallenge[] => {
+  const label = (w: ZWord) => (showPinyin ? `${w.chinese} (${w.pinyin})` : w.chinese);
+  const audio = (w: ZWord) => `/zh_${w.slug}.mp3`;
+
+  return lessonWords.map((word, i) => {
+    const distractors = pickDistractors(word, pool, OPTIONS_PER_CHALLENGE - 1);
+
+    if (i % 2 === 0) {
+      // SELECT: English prompt → pick the correct Chinese word.
+      const options = shuffle([
+        { correct: true, text: label(word), audioSrc: audio(word) },
+        ...distractors.map((d) => ({ correct: false, text: label(d), audioSrc: audio(d) })),
+      ]);
+      return {
+        type: "SELECT" as const,
+        question: `What is "${word.english}"?`,
+        order: i + 1,
+        audioSrc: null,
+        options,
+      };
+    }
+
+    // ASSIST (listening): hear/read the Chinese → pick the English meaning.
+    const options = shuffle([
+      { correct: true, text: word.english },
+      ...distractors.map((d) => ({ correct: false, text: d.english })),
+    ]);
+    return {
+      type: "ASSIST" as const,
+      question: label(word),
+      order: i + 1,
+      audioSrc: audio(word),
+      options,
+    };
   });
-  const eng = (w: Word, correct: boolean) => ({
-    correct,
-    text: w.english,
-    audioSrc: `/zh_${w.slug}.mp3`,
+};
+
+// Split a flat word list into lessons of 7 and units of 6 lessons.
+const buildLevelUnits = (words: ZWord[], level: number): ZUnit[] => {
+  const lessons = chunk(words, 7);
+  return chunk(lessons, 6).map((unitLessons, ui) => ({
+    title: `Unit ${ui + 1}`,
+    description: `HSK ${level} vocabulary · part ${ui + 1}`,
+    lessons: unitLessons.map((w, li) => ({ title: `Lesson ${li + 1}`, words: w })),
+  }));
+};
+
+// Efficient batched insert of an entire Chinese course.
+const seedChineseCourse = async (
+  courseId: number,
+  units: ZUnit[],
+  showPinyin: boolean
+) => {
+  const CHUNK = 500;
+
+  const unitRows = await db
+    .insert(schema.units)
+    .values(units.map((u, i) => ({ courseId, title: u.title, description: u.description, order: i + 1 })))
+    .returning();
+
+  // Flatten lessons (preserving order) so we can bulk-insert them.
+  const lessonValues: { unitId: number; title: string; order: number }[] = [];
+  const lessonWords: ZWord[][] = [];
+  units.forEach((u, ui) =>
+    u.lessons.forEach((l, li) => {
+      lessonValues.push({ unitId: unitRows[ui].id, title: l.title, order: li + 1 });
+      lessonWords.push(l.words);
+    })
+  );
+
+  const lessonRows: (typeof schema.lessons.$inferSelect)[] = [];
+  for (const c of chunk(lessonValues, CHUNK))
+    lessonRows.push(...(await db.insert(schema.lessons).values(c).returning()));
+
+  const pool = units.flatMap((u) => u.lessons.flatMap((l) => l.words));
+
+  // Build challenges with a parallel array of their option sets.
+  const challengeValues: {
+    lessonId: number; type: "SELECT" | "ASSIST"; question: string; order: number; audioSrc: string | null;
+  }[] = [];
+  const optionSets: BuiltChallenge["options"][] = [];
+
+  lessonRows.forEach((lesson, idx) => {
+    for (const b of buildChineseChallenges(lessonWords[idx], pool, showPinyin)) {
+      challengeValues.push({
+        lessonId: lesson.id,
+        type: b.type,
+        question: b.question,
+        order: b.order,
+        audioSrc: b.audioSrc,
+      });
+      optionSets.push(b.options);
+    }
   });
 
-  return [
-    // SELECT: English question → pick correct Chinese
-    { type: "SELECT", order: 1, question: `Which one means "${w0.english}"?`,   options: [opt(w0, true),  opt(w1, false), opt(w2, false)] },
-    { type: "SELECT", order: 2, question: `Which one means "${w1.english}"?`,   options: [opt(w1, true),  opt(w3, false), opt(w4, false)] },
-    { type: "SELECT", order: 3, question: `Which one means "${w2.english}"?`,   options: [opt(w2, true),  opt(w0, false), opt(w5, false)] },
-    // ASSIST: Chinese shown → pick correct English meaning
-    { type: "ASSIST", order: 4, question: w0.chinese,                           options: [eng(w0, true),  eng(w1, false), eng(w3, false)] },
-    // SELECT continued
-    { type: "SELECT", order: 5, question: `Which one means "${w3.english}"?`,   options: [opt(w3, true),  opt(w4, false), opt(w5, false)] },
-    { type: "SELECT", order: 6, question: `Which one means "${w4.english}"?`,   options: [opt(w4, true),  opt(w2, false), opt(w0, false)] },
-    { type: "SELECT", order: 7, question: `Which one means "${w5.english}"?`,   options: [opt(w5, true),  opt(w1, false), opt(w3, false)] },
-    // ASSIST: Chinese shown → pick correct English meaning
-    { type: "ASSIST", order: 8, question: w3.chinese,                           options: [eng(w3, true),  eng(w4, false), eng(w5, false)] },
-  ];
+  // Insert challenges in chunks; returning order matches insertion order, so we
+  // zip each returned id with its pre-built option set.
+  const optionValues: { challengeId: number; correct: boolean; text: string; audioSrc?: string }[] = [];
+  let gi = 0;
+  for (const c of chunk(challengeValues, CHUNK)) {
+    const rows = await db.insert(schema.challenges).values(c).returning();
+    rows.forEach((row, j) => {
+      for (const opt of optionSets[gi + j]) optionValues.push({ challengeId: row.id, ...opt });
+    });
+    gi += c.length;
+  }
+
+  for (const c of chunk(optionValues, CHUNK))
+    await db.insert(schema.challengeOptions).values(c);
 };
 
 // ─── Main ──────────────────────────────────────────────────────────────────
@@ -150,9 +273,9 @@ const main = async () => {
       .values(SCAFFOLD_LANGUAGES.map(({ title, imageSrc }) => ({ title, imageSrc })))
       .returning();
 
-    const [zhCourse] = await db
+    const chineseCourses = await db
       .insert(schema.courses)
-      .values([{ title: "Chinese", imageSrc: "/zh.svg" }])
+      .values([1, 2, 3, 4, 5, 6].map((lvl) => ({ title: `Chinese · HSK ${lvl}`, imageSrc: "/zh.svg" })))
       .returning();
 
     // ── 2. Scaffold languages (Spanish, French, Japanese, English) ────────
@@ -204,47 +327,22 @@ const main = async () => {
       }
     }
 
-    // ── 3. Chinese HSK curriculum ─────────────────────────────────────────
-    for (let ui = 0; ui < ZH_UNITS.length; ui++) {
-      const unitData = ZH_UNITS[ui];
+    // ── 3. Chinese HSK 1-6 ────────────────────────────────────────────────
+    // HSK 1: hand-curated thematic units (pinyin shown).
+    const [hsk1] = chineseCourses;
+    await seedChineseCourse(hsk1.id, ZH_UNITS as ZUnit[], true);
 
-      const [unit] = await db
-        .insert(schema.units)
-        .values([{
-          courseId: zhCourse.id,
-          title: unitData.title,
-          description: unitData.description,
-          order: ui + 1,
-        }])
-        .returning();
+    // HSK 2-6: generated from the open HSK dataset. Pinyin is shown through
+    // HSK 2, then hidden (characters-only) from HSK 3 up to raise difficulty.
+    const zhData = JSON.parse(
+      readFileSync(join(import.meta.dirname, "zh-hsk-data.json"), "utf-8")
+    ) as Record<string, ZWord[]>;
 
-      for (let li = 0; li < unitData.lessons.length; li++) {
-        const lessonData = unitData.lessons[li];
-
-        const [lesson] = await db
-          .insert(schema.lessons)
-          .values([{ unitId: unit.id, title: lessonData.title, order: li + 1 }])
-          .returning();
-
-        const challengeRows = buildZhChallenges(lessonData.words);
-
-        const challenges = await db
-          .insert(schema.challenges)
-          .values(challengeRows.map(({ type, question, order }) => ({
-            lessonId: lesson.id,
-            type,
-            question,
-            order,
-          })))
-          .returning();
-
-        for (const challenge of challenges) {
-          const row = challengeRows.find((r) => r.order === challenge.order)!;
-          await db.insert(schema.challengeOptions).values(
-            shuffle(row.options).map((opt) => ({ challengeId: challenge.id, ...opt }))
-          );
-        }
-      }
+    for (let lvl = 2; lvl <= 6; lvl++) {
+      const course = chineseCourses[lvl - 1];
+      const units = buildLevelUnits(zhData[String(lvl)], lvl);
+      await seedChineseCourse(course.id, units, lvl <= 2);
+      console.log(`  Seeded Chinese · HSK ${lvl} (${zhData[String(lvl)].length} words)`);
     }
 
     console.log("Database seeded successfully");
