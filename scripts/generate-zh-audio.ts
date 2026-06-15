@@ -14,8 +14,11 @@
  *
  *   # Re-generate everything, overwriting existing files
  *   FORCE=1 GOOGLE_TTS_API_KEY=xxx bun run audio:zh
+ *
+ *   # Only one HSK level at a time (1-6) to spread out the work/quota
+ *   HSK_LEVEL=2 GOOGLE_TTS_API_KEY=xxx bun run audio:zh
  */
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 
@@ -25,6 +28,8 @@ import { ZH_UNITS, type Word } from "./zh-content";
 
 const PUBLIC_DIR = join(process.cwd(), "public");
 const FORCE = process.env.FORCE === "1" || process.env.FORCE === "true";
+// Optional: restrict to a single HSK level (1-6). Default: all levels.
+const ONLY_LEVEL = process.env.HSK_LEVEL ? Number(process.env.HSK_LEVEL) : null;
 
 const provider =
   process.env.TTS_PROVIDER ??
@@ -34,13 +39,24 @@ const provider =
 
 const collectWords = (): Word[] => {
   const seen = new Map<string, Word>();
-  for (const unit of ZH_UNITS) {
-    for (const lesson of unit.lessons) {
-      for (const word of lesson.words) {
-        if (!seen.has(word.slug)) seen.set(word.slug, word);
-      }
-    }
+  const add = (w: Word) => {
+    if (!seen.has(w.slug)) seen.set(w.slug, w);
+  };
+
+  // HSK 1: hand-curated content.
+  if (!ONLY_LEVEL || ONLY_LEVEL === 1)
+    for (const unit of ZH_UNITS)
+      for (const lesson of unit.lessons) lesson.words.forEach(add);
+
+  // HSK 2-6: generated dataset.
+  const zhData = JSON.parse(
+    readFileSync(join(__dirname, "zh-hsk-data.json"), "utf-8")
+  ) as Record<string, Word[]>;
+  for (let lvl = 2; lvl <= 6; lvl++) {
+    if (ONLY_LEVEL && ONLY_LEVEL !== lvl) continue;
+    (zhData[String(lvl)] ?? []).forEach(add);
   }
+
   return [...seen.values()];
 };
 
