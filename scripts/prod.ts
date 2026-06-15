@@ -8,6 +8,15 @@ import { type Word, ZH_UNITS } from "./zh-content";
 const sql = neon(process.env.DATABASE_URL);
 const db = drizzle(sql, { schema });
 
+const shuffle = <T>(arr: T[]): T[] => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
 // ─── Scaffold languages (starter placeholder content) ─────────────────────
 
 type Vocab = {
@@ -188,7 +197,7 @@ const main = async () => {
 
           for (const challenge of challenges) {
             await db.insert(schema.challengeOptions).values(
-              optionMap[challenge.order].map((opt) => ({ challengeId: challenge.id, ...opt }))
+              shuffle(optionMap[challenge.order]).map((opt) => ({ challengeId: challenge.id, ...opt }))
             );
           }
         }
@@ -232,7 +241,7 @@ const main = async () => {
         for (const challenge of challenges) {
           const row = challengeRows.find((r) => r.order === challenge.order)!;
           await db.insert(schema.challengeOptions).values(
-            row.options.map((opt) => ({ challengeId: challenge.id, ...opt }))
+            shuffle(row.options).map((opt) => ({ challengeId: challenge.id, ...opt }))
           );
         }
       }
