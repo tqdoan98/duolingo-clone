@@ -73,7 +73,7 @@ const synthGoogle = async (text: string): Promise<Buffer> => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         input: { text },
-        voice: { languageCode: "zh-CN", name: "zh-CN-Wavenet-A" },
+        voice: { languageCode: "cmn-CN", name: "cmn-CN-Wavenet-A" },
         audioConfig: { audioEncoding: "MP3", speakingRate: 0.9 },
       }),
     }
