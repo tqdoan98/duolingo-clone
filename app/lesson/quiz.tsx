@@ -20,6 +20,7 @@ import { Footer } from "./footer";
 import { Header } from "./header";
 import { QuestionBubble } from "./question-bubble";
 import { ResultCard } from "./result-card";
+import { WriteChallenge } from "./write-challenge";
 
 type QuizProps = {
   initialPercentage: number;
@@ -29,6 +30,15 @@ type QuizProps = {
     completed: boolean;
     challengeOptions: (typeof challengeOptions.$inferSelect)[];
   })[];
+};
+
+// Accept the answer if it matches the correct text (case-insensitive, trimmed).
+// Also accepts if the typed answer is contained in the correct text or vice versa
+// to handle articles / short phrasings (e.g. "man" matching "the man").
+const checkWriteAnswer = (typed: string, correct: string): boolean => {
+  const t = typed.trim().toLowerCase();
+  const c = correct.trim().toLowerCase();
+  return t === c || c.includes(t) || t.includes(c);
 };
 
 export const Quiz = ({
@@ -73,10 +83,12 @@ export const Quiz = ({
   });
 
   const [selectedOption, setSelectedOption] = useState<number>();
+  const [typedAnswer, setTypedAnswer] = useState("");
   const [status, setStatus] = useState<"none" | "wrong" | "correct">("none");
 
   const challenge = challenges[activeIndex];
   const options = challenge?.challengeOptions ?? [];
+  const isWrite = challenge?.type === "WRITE";
 
   const onNext = () => {
     setActiveIndex((current) => current + 1);
@@ -84,16 +96,14 @@ export const Quiz = ({
 
   const onSelect = (id: number) => {
     if (status !== "none") return;
-
     setSelectedOption(id);
   };
 
   const onContinue = () => {
-    if (!selectedOption) return;
-
     if (status === "wrong") {
       setStatus("none");
       setSelectedOption(undefined);
+      setTypedAnswer("");
       return;
     }
 
@@ -101,11 +111,49 @@ export const Quiz = ({
       onNext();
       setStatus("none");
       setSelectedOption(undefined);
+      setTypedAnswer("");
       return;
     }
 
-    const correctOption = options.find((option) => option.correct);
+    if (isWrite) {
+      const correctOption = options.find((o) => o.correct);
+      if (!correctOption) return;
 
+      const isCorrect = checkWriteAnswer(typedAnswer, correctOption.text);
+
+      if (isCorrect) {
+        startTransition(() => {
+          upsertChallengeProgress(challenge.id)
+            .then(() => {
+              void correctControls.play();
+              setStatus("correct");
+              setPercentage((prev) => prev + 100 / challenges.length);
+              if (initialPercentage === 100)
+                setHearts((prev) => Math.min(prev + 1, MAX_HEARTS));
+            })
+            .catch(() =>
+              toast.error("Something went wrong. Please try again.")
+            );
+        });
+      } else {
+        startTransition(() => {
+          reduceHearts(challenge.id)
+            .then((response) => {
+              void incorrectControls.play();
+              setStatus("wrong");
+              if (!response?.error) setHearts((prev) => Math.max(prev - 1, 0));
+            })
+            .catch(() =>
+              toast.error("Something went wrong. Please try again.")
+            );
+        });
+      }
+      return;
+    }
+
+    // SELECT / ASSIST
+    if (!selectedOption) return;
+    const correctOption = options.find((option) => option.correct);
     if (!correctOption) return;
 
     if (correctOption.id === selectedOption) {
@@ -116,7 +164,6 @@ export const Quiz = ({
             setStatus("correct");
             setPercentage((prev) => prev + 100 / challenges.length);
 
-            // This is a practice
             if (initialPercentage === 100) {
               setHearts((prev) => Math.min(prev + 1, MAX_HEARTS));
             }
@@ -192,7 +239,12 @@ export const Quiz = ({
   const title =
     challenge.type === "ASSIST"
       ? "Select the correct meaning"
-      : challenge.question;
+      : challenge.type === "WRITE"
+        ? "Write what you hear"
+        : challenge.question;
+
+  const footerDisabled =
+    pending || (isWrite ? !typedAnswer.trim() : !selectedOption);
 
   return (
     <>
@@ -212,28 +264,37 @@ export const Quiz = ({
             </h1>
 
             <div>
-              {challenge.type === "ASSIST" && (
+              {(challenge.type === "ASSIST" || challenge.type === "WRITE") && (
                 <QuestionBubble
                   question={challenge.question}
                   audioSrc={challenge.audioSrc}
                 />
               )}
 
-              <Challenge
-                options={options}
-                onSelect={onSelect}
-                status={status}
-                selectedOption={selectedOption}
-                disabled={pending}
-                type={challenge.type}
-              />
+              {isWrite ? (
+                <WriteChallenge
+                  value={typedAnswer}
+                  onChange={setTypedAnswer}
+                  status={status}
+                  disabled={pending || status !== "none"}
+                />
+              ) : (
+                <Challenge
+                  options={options}
+                  onSelect={onSelect}
+                  status={status}
+                  selectedOption={selectedOption}
+                  disabled={pending}
+                  type={challenge.type}
+                />
+              )}
             </div>
           </div>
         </div>
       </div>
 
       <Footer
-        disabled={pending || !selectedOption}
+        disabled={footerDisabled}
         status={status}
         onCheck={onContinue}
       />
