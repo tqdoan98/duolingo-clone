@@ -128,13 +128,14 @@ const pickDistractors = (word: ZWord, pool: ZWord[], n: number): ZWord[] => {
 };
 
 type BuiltChallenge = {
-  type: "SELECT" | "ASSIST";
+  type: "SELECT" | "ASSIST" | "WRITE";
   question: string;
   order: number;
   audioSrc: string | null;
   options: { correct: boolean; text: string; audioSrc?: string }[];
 };
 
+// Pattern per word index: 0=SELECT, 1=ASSIST, 2=WRITE, repeating.
 const buildChineseChallenges = (
   lessonWords: ZWord[],
   pool: ZWord[],
@@ -144,10 +145,11 @@ const buildChineseChallenges = (
   const audio = (w: ZWord) => `/zh_${w.slug}.mp3`;
 
   return lessonWords.map((word, i) => {
-    const distractors = pickDistractors(word, pool, OPTIONS_PER_CHALLENGE - 1);
+    const mod = i % 3;
 
-    if (i % 2 === 0) {
+    if (mod === 0) {
       // SELECT: English prompt → pick the correct Chinese word.
+      const distractors = pickDistractors(word, pool, OPTIONS_PER_CHALLENGE - 1);
       const options = shuffle([
         { correct: true, text: label(word), audioSrc: audio(word) },
         ...distractors.map((d) => ({ correct: false, text: label(d), audioSrc: audio(d) })),
@@ -161,17 +163,30 @@ const buildChineseChallenges = (
       };
     }
 
-    // ASSIST (listening): hear/read the Chinese → pick the English meaning.
-    const options = shuffle([
-      { correct: true, text: word.english },
-      ...distractors.map((d) => ({ correct: false, text: d.english })),
-    ]);
+    if (mod === 1) {
+      // ASSIST (listening): Chinese shown → pick the English meaning.
+      const distractors = pickDistractors(word, pool, OPTIONS_PER_CHALLENGE - 1);
+      const options = shuffle([
+        { correct: true, text: word.english },
+        ...distractors.map((d) => ({ correct: false, text: d.english })),
+      ]);
+      return {
+        type: "ASSIST" as const,
+        question: label(word),
+        order: i + 1,
+        audioSrc: audio(word),
+        options,
+      };
+    }
+
+    // WRITE: Chinese shown → type the English meaning.
     return {
-      type: "ASSIST" as const,
+      type: "WRITE" as const,
       question: label(word),
       order: i + 1,
       audioSrc: audio(word),
-      options,
+      // One correct option — the expected typed answer.
+      options: [{ correct: true, text: word.english, audioSrc: audio(word) }],
     };
   });
 };
@@ -217,7 +232,7 @@ const seedChineseCourse = async (
 
   // Build challenges with a parallel array of their option sets.
   const challengeValues: {
-    lessonId: number; type: "SELECT" | "ASSIST"; question: string; order: number; audioSrc: string | null;
+    lessonId: number; type: "SELECT" | "ASSIST" | "WRITE"; question: string; order: number; audioSrc: string | null;
   }[] = [];
   const optionSets: BuiltChallenge["options"][] = [];
 
